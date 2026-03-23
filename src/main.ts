@@ -37,7 +37,14 @@ transport.onRequest("initialize", async (params) => {
   }
 
   bridge = new WechatOpenClawBridge(cfg, transport, log);
-  streamHandler = new AgentStreamHandler((payload) => bridge!.sendSystemText(payload), log);
+  streamHandler = new AgentStreamHandler(
+    (payload) => bridge!.sendSystemText(payload),
+    log,
+    {
+      startTyping: (channelId) => bridge!.startTyping(channelId),
+      stopTyping: (channelId) => bridge!.stopTyping(channelId),
+    },
+  );
   const botInfo = await bridge.probe();
   bridge.start();
 

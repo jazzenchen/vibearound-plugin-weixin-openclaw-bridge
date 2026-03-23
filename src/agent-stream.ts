@@ -7,15 +7,20 @@ interface ChannelState {
 type LogFn = (level: string, message: string) => void;
 
 type SendFn = (params: { channelId: string; text: string; replyTo?: string }) => Promise<void>;
+type TypingFn = (channelId: string) => Promise<void>;
 
 export class AgentStreamHandler {
   private log: LogFn;
   private send: SendFn;
+  private startTyping?: TypingFn;
+  private stopTyping?: TypingFn;
   private channels = new Map<string, ChannelState>();
 
-  constructor(send: SendFn, log: LogFn) {
+  constructor(send: SendFn, log: LogFn, options?: { startTyping?: TypingFn; stopTyping?: TypingFn }) {
     this.send = send;
     this.log = log;
+    this.startTyping = options?.startTyping;
+    this.stopTyping = options?.stopTyping;
   }
 
   onAgentStart(params: Record<string, unknown>): void {
@@ -24,6 +29,9 @@ export class AgentStreamHandler {
       text: "",
       thinking: "",
       toolLines: [],
+    });
+    void this.startTyping?.(channelId).catch((error) => {
+      this.log("warn", `start typing failed: ${error instanceof Error ? error.message : String(error)}`);
     });
     this.log("debug", `agent_start channel=${channelId}`);
   }
@@ -65,6 +73,9 @@ export class AgentStreamHandler {
 
     const content = this.buildContent(state);
     this.channels.delete(channelId);
+    void this.stopTyping?.(channelId).catch((error) => {
+      this.log("warn", `stop typing failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
 
     if (!content) {
       this.log("debug", `agent_end channel=${channelId} with empty content`);
@@ -74,7 +85,7 @@ export class AgentStreamHandler {
     void this.send({ channelId, text: content }).catch((error) => {
       this.log(
         "error",
-        `send aggregated reply failed: ${error instanceof Error ? error.message : String(error)}`
+        `send aggregated reply failed: ${error instanceof Error ? error.message : String(error)}`,
       );
     });
   }
@@ -83,11 +94,12 @@ export class AgentStreamHandler {
     const channelId = params.channelId as string;
     const error = params.error as string;
     this.channels.delete(channelId);
+    void this.stopTyping?.(channelId).catch(() => {});
 
     void this.send({ channelId, text: `❌ Error: ${error}` }).catch((sendError) => {
       this.log(
         "error",
-        `send error notice failed: ${sendError instanceof Error ? sendError.message : String(sendError)}`
+        `send error notice failed: ${sendError instanceof Error ? sendError.message : String(sendError)}`,
       );
     });
   }
@@ -96,11 +108,12 @@ export class AgentStreamHandler {
     const channelId = params.channelId as string;
     const text = params.text as string;
     const replyTo = params.replyTo as string | undefined;
+    void this.stopTyping?.(channelId).catch(() => {});
 
     void this.send({ channelId, text, replyTo }).catch((error) => {
       this.log(
         "error",
-        `send_system_text failed: ${error instanceof Error ? error.message : String(error)}`
+        `send_system_text failed: ${error instanceof Error ? error.message : String(error)}`,
       );
     });
   }

@@ -2,7 +2,7 @@
   "id": "weixin-openclaw-bridge",
   "name": "WeChat OpenClaw Bridge",
   "version": "0.1.0",
-  "type": "channel",
+  "kind": "channel",
   "runtime": "node",
   "entry": "dist/main.js",
   "build": "npm install && npm run build",
@@ -21,6 +21,9 @@
     "interactiveCards": false,
     "reactions": false,
     "editMessage": false,
-    "media": false
+    "media": false,
+    "auth": {
+      "methods": ["qrcode_login"]
+    }
   }
 }

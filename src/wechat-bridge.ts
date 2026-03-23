@@ -1,5 +1,16 @@
-import { startWeixinLoginWithQr, waitForWeixinLogin } from "./login-qr.js";
-import { extractText, getUpdates, sendTextMessage, type WeixinMessage } from "./weixin-api.js";
+import path from "node:path";
+import os from "node:os";
+
+import { getConfig, getUpdates, sendTyping } from "./api/api.js";
+import type { WeixinApiOptions } from "./api/api.js";
+import type { WeixinMessage } from "./api/types.js";
+import { TypingStatus } from "./api/types.js";
+import { extractInboundText, getContextToken, setContextToken, shouldHandleInboundMessage } from "./messaging/inbound.js";
+import { sendMessageWeixin } from "./messaging/send.js";
+import { sendWeixinMediaFile } from "./messaging/send-media.js";
+import { downloadRemoteImageToTemp, type UploadedFileInfo, uploadFileAttachmentToWeixin, uploadFileToWeixin, uploadVideoToWeixin } from "./cdn/upload.js";
+import { getMimeFromFilename } from "./media/mime.js";
+import { startWeixinLoginWithQr, waitForWeixinLogin } from "./auth/login-qr.js";
 import type {
   LoginQrStartParams,
   LoginQrWaitParams,
@@ -7,6 +18,7 @@ import type {
   WechatOpenClawBridgeConfig,
 } from "./protocol.js";
 import type { StdioTransport } from "./stdio.js";
+import { logger } from "./util/logger.js";
 
 interface BridgeState {
   getUpdatesBuf: string;
@@ -14,6 +26,8 @@ interface BridgeState {
 }
 
 const DEFAULT_LONG_POLL_TIMEOUT_MS = 35_000;
+const DEFAULT_CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c";
+const MEDIA_OUTBOUND_TEMP_DIR = path.join(os.tmpdir(), "vibearound", "weixin", "media", "outbound-temp");
 
 type LogFn = (level: string, message: string) => void;
 
@@ -27,7 +41,7 @@ export class WechatOpenClawBridge {
   };
   private polling = false;
   private stopped = false;
-  private contextTokens = new Map<string, string>();
+  private typingTicketByPeer = new Map<string, string>();
 
   constructor(config: WechatOpenClawBridgeConfig, transport: StdioTransport, log: LogFn) {
     this.config = config;
@@ -59,6 +73,7 @@ export class WechatOpenClawBridge {
       accountId: params.accountId || this.config.account_id,
       apiBaseUrl: params.baseUrl || this.config.base_url,
       force: params.force,
+      verbose: params.verbose,
     });
     return result as Record<string, unknown>;
   }
@@ -68,6 +83,7 @@ export class WechatOpenClawBridge {
       sessionKey: params.sessionKey,
       apiBaseUrl: params.baseUrl || this.config.base_url,
       timeoutMs: params.timeoutMs,
+      verbose: params.verbose,
     });
     if (result.connected && result.botToken) {
       this.config.bot_token = result.botToken;
@@ -83,14 +99,112 @@ export class WechatOpenClawBridge {
       throw new Error("bot_token is required before sending WeChat messages");
     }
     const to = this.extractPeerId(params.channelId);
-    const contextToken = this.contextTokens.get(to);
-    await sendTextMessage({
-      baseUrl: this.config.base_url,
-      token: this.config.bot_token,
+    await sendMessageWeixin({
       to,
       text: params.text,
-      contextToken,
+      opts: {
+        baseUrl: this.config.base_url,
+        token: this.config.bot_token,
+        contextToken: getContextToken(this.config.account_id || "default", to),
+      },
     });
+  }
+
+  async startTyping(channelId: string): Promise<void> {
+    if (!this.config.bot_token) return;
+    const to = this.extractPeerId(channelId);
+    const ticket = await this.resolveTypingTicket(to);
+    if (!ticket) return;
+    await sendTyping({
+      baseUrl: this.config.base_url,
+      token: this.config.bot_token,
+      body: {
+        ilink_user_id: to,
+        typing_ticket: ticket,
+        status: TypingStatus.TYPING,
+      },
+    });
+  }
+
+  async stopTyping(channelId: string): Promise<void> {
+    if (!this.config.bot_token) return;
+    const to = this.extractPeerId(channelId);
+    const ticket = this.typingTicketByPeer.get(to) ?? (await this.resolveTypingTicket(to));
+    if (!ticket) return;
+    await sendTyping({
+      baseUrl: this.config.base_url,
+      token: this.config.bot_token,
+      body: {
+        ilink_user_id: to,
+        typing_ticket: ticket,
+        status: TypingStatus.CANCEL,
+      },
+    });
+  }
+
+  async prepareMediaFromFile(filePath: string, to: string): Promise<UploadedFileInfo> {
+    if (!this.config.bot_token) {
+      throw new Error("bot_token is required before uploading WeChat media");
+    }
+    const uploadOpts: WeixinApiOptions = { baseUrl: this.config.base_url, token: this.config.bot_token };
+    const mime = getMimeFromFilename(filePath);
+    if (mime.startsWith("video/")) {
+      return uploadVideoToWeixin({ filePath, toUserId: to, opts: uploadOpts, cdnBaseUrl: DEFAULT_CDN_BASE_URL });
+    }
+    if (mime.startsWith("image/")) {
+      return uploadFileToWeixin({ filePath, toUserId: to, opts: uploadOpts, cdnBaseUrl: DEFAULT_CDN_BASE_URL });
+    }
+    return uploadFileAttachmentToWeixin({
+      filePath,
+      fileName: path.basename(filePath),
+      toUserId: to,
+      opts: uploadOpts,
+      cdnBaseUrl: DEFAULT_CDN_BASE_URL,
+    });
+  }
+
+  async prepareMediaFromUrl(url: string, to: string): Promise<UploadedFileInfo> {
+    const filePath = await downloadRemoteImageToTemp(url, MEDIA_OUTBOUND_TEMP_DIR);
+    return this.prepareMediaFromFile(filePath, to);
+  }
+
+  async sendMediaFile(params: { channelId: string; filePath: string; text?: string }): Promise<void> {
+    if (!this.config.bot_token) {
+      throw new Error("bot_token is required before sending WeChat media");
+    }
+    const to = this.extractPeerId(params.channelId);
+    await sendWeixinMediaFile({
+      filePath: params.filePath,
+      to,
+      text: params.text ?? "",
+      opts: {
+        baseUrl: this.config.base_url,
+        token: this.config.bot_token,
+        contextToken: getContextToken(this.config.account_id || "default", to),
+      },
+      cdnBaseUrl: DEFAULT_CDN_BASE_URL,
+    });
+  }
+
+  private async resolveTypingTicket(to: string): Promise<string | undefined> {
+    const existing = this.typingTicketByPeer.get(to);
+    if (existing) return existing;
+    if (!this.config.bot_token) return undefined;
+    try {
+      const config = await getConfig({
+        baseUrl: this.config.base_url,
+        token: this.config.bot_token,
+        ilinkUserId: to,
+        contextToken: getContextToken(this.config.account_id || "default", to),
+      });
+      if (config.typing_ticket) {
+        this.typingTicketByPeer.set(to, config.typing_ticket);
+      }
+      return config.typing_ticket;
+    } catch (error) {
+      logger.warn(`resolveTypingTicket failed for ${to}: ${error instanceof Error ? error.message : String(error)}`);
+      return undefined;
+    }
   }
 
   private async pollLoop(): Promise<void> {
@@ -130,14 +244,21 @@ export class WechatOpenClawBridge {
   }
 
   private handleInboundMessage(message: WeixinMessage): void {
+    if (!shouldHandleInboundMessage(message)) return;
+
     const fromUserId = message.from_user_id;
     if (!fromUserId) return;
 
-    const text = extractText(message);
-    if (!text) return;
-
+    const text = extractInboundText(message);
     if (message.context_token) {
-      this.contextTokens.set(fromUserId, message.context_token);
+      setContextToken(this.config.account_id || "default", fromUserId, message.context_token);
+    }
+
+    if (!text) {
+      logger.debug(
+        `drop inbound message_id=${String(message.message_id ?? "")} from=${fromUserId} because no text payload was extracted`,
+      );
+      return;
     }
 
     const params: OnMessageParams = {
@@ -153,6 +274,7 @@ export class WechatOpenClawBridge {
     };
 
     this.transport.notify("on_message", params as unknown as Record<string, unknown>);
+    this.log("debug", `on_message peer=${fromUserId} text=${text.slice(0, 80)}`);
   }
 
   private extractPeerId(channelId: string): string {

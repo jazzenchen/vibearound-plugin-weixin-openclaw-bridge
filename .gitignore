@@ -21,3 +21,7 @@ src/tools/docs/
 
 .env
 .env.local
+
+# local package inspection artifacts
+.tmp-official/
+*.tgz
