@@ -77,8 +77,9 @@ const client: (agent: Agent) => Client = (a) => {
       const normalizedMethod = method.startsWith("_") ? method.slice(1) : method;
       switch (normalizedMethod) {
         case "channel/system_text": {
+          const channelId = params.channelId as string;
           const text = params.text as string;
-          streamHandler?.onSendSystemText({ text });
+          streamHandler?.onSendSystemText({ channelId, text });
           break;
         }
         case "channel/agent_ready": {
