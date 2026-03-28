@@ -18,12 +18,16 @@ The plugin runs as a child process of the host. Messages are exchanged over stdi
 
 ## Features
 
+- **Block-based rendering**: each contiguous run of the same variant (thinking, tool use, text) is sent as a separate message. When the variant changes, the current block is sealed and a new message starts.
+- **sendChain message ordering**: all `flushBlock` calls are serialized via a promise chain to prevent out-of-order delivery
+- **Typing await before prompt**: `startTyping()` is awaited before calling `prompt()`, ensuring the typing indicator is visible before the agent turn can complete
 - QR login flow for WeChat OpenClaw bot authorization
 - Long-polling inbound message consumption via `ilink/bot/getupdates`
 - Outbound text message sending via `ilink/bot/sendmessage`
 - Context token propagation for follow-up replies
 - Lightweight stdio JSON-RPC bridge for VibeAround channel integration
 - Compatible with `base_url`-driven OpenClaw / iLink-style deployments
+- `/help` slash command returns cached agent commands + system commands
 
 ## Project Structure
 
