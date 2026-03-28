@@ -1,24 +1,36 @@
 #!/usr/bin/env node
+/**
+ * VibeAround WeChat OpenClaw Bridge Plugin — ACP Client
+ *
+ * Spawned by the Rust host as a child process.
+ * Communicates via ACP protocol (JSON-RPC 2.0 over stdio).
+ *
+ * Plugin = ACP Client, Host = ACP Agent.
+ * Plugin sends prompt() with peerId as sessionId.
+ * Host streams back via sessionUpdate notifications.
+ */
 
-import "./stdout-guard.js";
-import { setLogSink } from "./stdout-guard.js";
+import { Readable, Writable } from "node:stream";
+import {
+  ClientSideConnection,
+  ndJsonStream,
+  PROTOCOL_VERSION,
+  type Agent,
+  type Client,
+  type SessionNotification,
+  type RequestPermissionRequest,
+  type RequestPermissionResponse,
+} from "@agentclientprotocol/sdk";
 
-import { StdioTransport } from "./stdio.js";
 import { WechatOpenClawBridge } from "./wechat-bridge.js";
 import { AgentStreamHandler } from "./agent-stream.js";
-import type {
-  InitializeParams,
-  InitializeResult,
-  LoginQrStartParams,
-  LoginQrWaitParams,
-  WechatOpenClawBridgeConfig,
-} from "./protocol.js";
+import type { WechatOpenClawBridgeConfig } from "./protocol.js";
 
-const transport = new StdioTransport();
-setLogSink((level, message) => {
-  transport.notify("plugin_log", { level, message });
-});
+// ---------------------------------------------------------------------------
+// Globals
+// ---------------------------------------------------------------------------
 
+let agent: Agent | null = null;
 let bridge: WechatOpenClawBridge | null = null;
 let streamHandler: AgentStreamHandler | null = null;
 
@@ -26,94 +38,142 @@ function log(level: string, message: string): void {
   process.stderr.write(`[weixin-openclaw-bridge][${level}] ${message}\n`);
 }
 
-transport.onRequest("initialize", async (params) => {
-  const { config, hostVersion } = params as unknown as InitializeParams;
-  const cfg = config as WechatOpenClawBridgeConfig;
+// Redirect console to stderr
+console.log = (...args: unknown[]) => process.stderr.write(args.map(String).join(" ") + "\n");
+console.info = console.log;
+console.warn = (...args: unknown[]) => process.stderr.write(`[warn] ${args.map(String).join(" ")}\n`);
+console.error = (...args: unknown[]) => process.stderr.write(`[error] ${args.map(String).join(" ")}\n`);
+console.debug = (...args: unknown[]) => process.stderr.write(`[debug] ${args.map(String).join(" ")}\n`);
 
-  log("info", `initialize hostVersion=${hostVersion}`);
+// ---------------------------------------------------------------------------
+// ACP Client implementation — receives events from host
+// ---------------------------------------------------------------------------
 
-  if (!cfg.base_url) {
+const client: (agent: Agent) => Client = (a) => {
+  agent = a;
+
+  return {
+    async sessionUpdate(params: SessionNotification): Promise<void> {
+      streamHandler?.onSessionUpdate(params);
+    },
+
+    async requestPermission(
+      params: RequestPermissionRequest
+    ): Promise<RequestPermissionResponse> {
+      const first = params.options?.[0];
+      if (first) {
+        return {
+          outcome: {
+            outcome: "selected",
+            optionId: first.optionId,
+          },
+        } as RequestPermissionResponse;
+      }
+      throw new Error("No permission options provided");
+    },
+
+    async extNotification(method: string, params: Record<string, unknown>): Promise<void> {
+      // ACP SDK prepends "_" to ext methods — normalize
+      const normalizedMethod = method.startsWith("_") ? method.slice(1) : method;
+      switch (normalizedMethod) {
+        case "channel/system_text": {
+          const text = params.text as string;
+          streamHandler?.onSendSystemText({ text });
+          break;
+        }
+        case "channel/agent_ready": {
+          const agentName = params.agent as string;
+          const version = params.version as string;
+          log("info", `agent_ready: ${agentName} v${version}`);
+          streamHandler?.onAgentReady(agentName, version);
+          break;
+        }
+        case "channel/session_ready": {
+          const sessionId = params.sessionId as string;
+          log("info", `session_ready: ${sessionId}`);
+          streamHandler?.onSessionReady(sessionId);
+          break;
+        }
+        default:
+          log("warn", `unhandled ext_notification: ${method}`);
+      }
+    },
+  };
+};
+
+// ---------------------------------------------------------------------------
+// Create ACP connection via stdio
+// ---------------------------------------------------------------------------
+
+const inputStream = Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>;
+const outputStream = Writable.toWeb(process.stdout) as WritableStream<Uint8Array>;
+const stream = ndJsonStream(outputStream, inputStream);
+const conn = new ClientSideConnection(client, stream);
+
+// ---------------------------------------------------------------------------
+// Initialize — get channel config from host
+// ---------------------------------------------------------------------------
+
+async function start(): Promise<void> {
+  log("info", "initializing ACP connection...");
+
+  const initResponse = await conn.initialize({
+    protocolVersion: PROTOCOL_VERSION,
+    clientInfo: {
+      name: "vibearound-weixin-openclaw-bridge",
+      version: "0.1.0",
+    },
+    capabilities: {},
+  });
+
+  // Extract channel config from _meta
+  const meta = (initResponse as any)._meta as Record<string, unknown> | undefined;
+  const config = (meta?.config ?? {}) as WechatOpenClawBridgeConfig;
+
+  if (!config.base_url) {
     throw new Error("base_url is required in WeChat OpenClaw Bridge config");
   }
 
-  bridge = new WechatOpenClawBridge(cfg, transport, log);
+  log("info", `initialized, host=${initResponse.agentInfo?.name ?? "unknown"}`);
+
+  // Create bridge — pass agent reference for sending prompts
+  bridge = new WechatOpenClawBridge(config, agent!, log);
+  // Parse verbose config
+  const verbose = (config as any).verbose as { show_thinking?: boolean; show_tool_use?: boolean } | undefined;
+
   streamHandler = new AgentStreamHandler(
     (payload) => bridge!.sendSystemText(payload),
     log,
     {
       startTyping: (channelId) => bridge!.startTyping(channelId),
       stopTyping: (channelId) => bridge!.stopTyping(channelId),
+      verbose: {
+        showThinking: verbose?.show_thinking ?? false,
+        showToolUse: verbose?.show_tool_use ?? false,
+      },
     },
   );
+
+  bridge.setPromptCallback((channelId) => streamHandler?.onPromptSent(channelId));
+  bridge.setTurnCallbacks(
+    (params) => streamHandler?.onAgentEnd(params),
+    (params) => streamHandler?.onAgentError(params),
+  );
+
   const botInfo = await bridge.probe();
+  log("info", `bot probed: ${JSON.stringify(botInfo)}`);
   bridge.start();
 
-  const result: InitializeResult = {
-    protocolVersion: "0.2.0",
-    capabilities: {
-      streaming: false,
-      interactiveCards: false,
-      reactions: false,
-      editMessage: false,
-      media: false,
-    },
-    botInfo,
-  };
-  return result;
-});
+  log("info", "plugin started");
 
-transport.onRequest("login_qr_start", async (params) => {
-  if (!bridge) {
-    throw new Error("bridge is not initialized");
-  }
-  return bridge.loginQrStart(params as unknown as LoginQrStartParams);
-});
+  // Wait for connection to close
+  await conn.closed;
+  log("info", "connection closed, shutting down");
+  bridge.stop();
+  process.exit(0);
+}
 
-transport.onRequest("login_qr_wait", async (params) => {
-  if (!bridge) {
-    throw new Error("bridge is not initialized");
-  }
-  return bridge.loginQrWait(params as unknown as LoginQrWaitParams);
+start().catch((error) => {
+  log("error", `fatal: ${error}`);
+  process.exit(1);
 });
-
-transport.onNotification("agent_start", (params) => {
-  streamHandler?.onAgentStart(params);
-});
-
-transport.onNotification("agent_thinking", (params) => {
-  streamHandler?.onAgentThinking(params);
-});
-
-transport.onNotification("agent_token", (params) => {
-  streamHandler?.onAgentToken(params);
-});
-
-transport.onNotification("agent_tool_use", (params) => {
-  streamHandler?.onAgentToolUse(params);
-});
-
-transport.onNotification("agent_tool_result", (params) => {
-  streamHandler?.onAgentToolResult(params);
-});
-
-transport.onNotification("agent_end", (params) => {
-  streamHandler?.onAgentEnd(params);
-});
-
-transport.onNotification("agent_error", (params) => {
-  streamHandler?.onAgentError(params);
-});
-
-transport.onNotification("send_system_text", (params) => {
-  streamHandler?.onSendSystemText(params);
-});
-
-transport.onRequest("shutdown", async () => {
-  log("info", "shutdown requested");
-  bridge?.stop();
-  setTimeout(() => process.exit(0), 200);
-  return { ok: true };
-});
-
-transport.start();
-log("info", "plugin started, waiting for initialize...");

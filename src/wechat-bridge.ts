@@ -11,13 +11,12 @@ import { sendWeixinMediaFile } from "./messaging/send-media.js";
 import { downloadRemoteImageToTemp, type UploadedFileInfo, uploadFileAttachmentToWeixin, uploadFileToWeixin, uploadVideoToWeixin } from "./cdn/upload.js";
 import { getMimeFromFilename } from "./media/mime.js";
 import { startWeixinLoginWithQr, waitForWeixinLogin } from "./auth/login-qr.js";
+import type { Agent } from "@agentclientprotocol/sdk";
 import type {
   LoginQrStartParams,
   LoginQrWaitParams,
-  OnMessageParams,
   WechatOpenClawBridgeConfig,
 } from "./protocol.js";
-import type { StdioTransport } from "./stdio.js";
 import { logger } from "./util/logger.js";
 
 interface BridgeState {
@@ -33,8 +32,11 @@ type LogFn = (level: string, message: string) => void;
 
 export class WechatOpenClawBridge {
   private config: WechatOpenClawBridgeConfig;
-  private transport: StdioTransport;
+  private agent: Agent;
   private log: LogFn;
+  private onPromptSent?: (channelId: string) => void;
+  private onAgentEnd?: (params: { channelId: string }) => void;
+  private onAgentError?: (params: { channelId: string; error: string }) => void;
   private state: BridgeState = {
     getUpdatesBuf: "",
     longPollTimeoutMs: DEFAULT_LONG_POLL_TIMEOUT_MS,
@@ -43,10 +45,22 @@ export class WechatOpenClawBridge {
   private stopped = false;
   private typingTicketByPeer = new Map<string, string>();
 
-  constructor(config: WechatOpenClawBridgeConfig, transport: StdioTransport, log: LogFn) {
+  constructor(config: WechatOpenClawBridgeConfig, agent: Agent, log: LogFn) {
     this.config = config;
-    this.transport = transport;
+    this.agent = agent;
     this.log = log;
+  }
+
+  setPromptCallback(cb: (channelId: string) => void): void {
+    this.onPromptSent = cb;
+  }
+
+  setTurnCallbacks(
+    onEnd: (params: { channelId: string }) => void,
+    onError: (params: { channelId: string; error: string }) => void,
+  ): void {
+    this.onAgentEnd = onEnd;
+    this.onAgentError = onError;
   }
 
   async probe(): Promise<{ id?: string; name: string }> {
@@ -243,7 +257,7 @@ export class WechatOpenClawBridge {
     }
   }
 
-  private handleInboundMessage(message: WeixinMessage): void {
+  private async handleInboundMessage(message: WeixinMessage): Promise<void> {
     if (!shouldHandleInboundMessage(message)) return;
 
     const fromUserId = message.from_user_id;
@@ -261,20 +275,31 @@ export class WechatOpenClawBridge {
       return;
     }
 
-    const params: OnMessageParams = {
-      channelId: `weixin-openclaw-bridge:${fromUserId}`,
-      messageId: String(message.message_id ?? `${Date.now()}`),
-      chatType: "private",
-      sender: {
-        id: fromUserId,
-        name: fromUserId,
-        type: "user",
-      },
-      text,
-    };
+    // Notify stream handler and start typing BEFORE prompt
+    const channelId = `weixin-openclaw-bridge:${fromUserId}`;
+    this.onPromptSent?.(channelId);
+    await this.startTyping(channelId).catch((e) => {
+      this.log("warn", `start typing failed: ${e}`);
+    });
 
-    this.transport.notify("on_message", params as unknown as Record<string, unknown>);
-    this.log("debug", `on_message peer=${fromUserId} text=${text.slice(0, 80)}`);
+    // Send as ACP prompt — blocks until turn completes, returns real StopReason.
+    // Session notifications stream in during the call.
+    this.log("debug", `prompt peer=${fromUserId} text=${text.slice(0, 80)}`);
+    try {
+      const response = await this.agent.prompt({
+        sessionId: fromUserId,
+        prompt: [{ type: "text", text }],
+      });
+      this.log("info", `prompt done peer=${fromUserId} stopReason=${response.stopReason}`);
+      this.onAgentEnd?.({ channelId });
+    } catch (error: unknown) {
+      this.log("error", `prompt failed peer=${fromUserId}: ${error}`);
+      this.onAgentError?.({ channelId, error: String(error) });
+    } finally {
+      await this.stopTyping(channelId).catch((e) => {
+        this.log("warn", `stop typing failed: ${e}`);
+      });
+    }
   }
 
   private extractPeerId(channelId: string): string {
