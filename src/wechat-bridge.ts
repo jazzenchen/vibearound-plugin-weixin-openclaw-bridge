@@ -4,14 +4,16 @@ import os from "node:os";
 import { getConfig, getUpdates, sendTyping } from "./api/api.js";
 import type { WeixinApiOptions } from "./api/api.js";
 import type { WeixinMessage } from "./api/types.js";
-import { TypingStatus } from "./api/types.js";
-import { extractInboundText, getContextToken, setContextToken, shouldHandleInboundMessage } from "./messaging/inbound.js";
+import { MessageItemType, TypingStatus } from "./api/types.js";
+import { extractInboundText, getContextToken, isMediaItem, setContextToken, shouldHandleInboundMessage } from "./messaging/inbound.js";
 import { sendMessageWeixin } from "./messaging/send.js";
 import { sendWeixinMediaFile } from "./messaging/send-media.js";
 import { downloadRemoteImageToTemp, type UploadedFileInfo, uploadFileAttachmentToWeixin, uploadFileToWeixin, uploadVideoToWeixin } from "./cdn/upload.js";
 import { getMimeFromFilename } from "./media/mime.js";
+import { downloadMediaItem } from "./media/media-download.js";
+import type { DownloadedMedia } from "./media/media-download.js";
 import { startWeixinLoginWithQr, waitForWeixinLogin } from "./auth/login-qr.js";
-import type { Agent } from "@agentclientprotocol/sdk";
+import type { Agent, ContentBlock } from "@vibearound/plugin-channel-sdk";
 import type {
   LoginQrStartParams,
   LoginQrWaitParams,
@@ -34,6 +36,7 @@ export class WechatOpenClawBridge {
   private config: WechatOpenClawBridgeConfig;
   private agent: Agent;
   private log: LogFn;
+  private cacheDir: string;
   private onPromptSent?: (channelId: string) => void;
   private onAgentEnd?: (params: { channelId: string }) => void;
   private onAgentError?: (params: { channelId: string; error: string }) => void;
@@ -45,10 +48,11 @@ export class WechatOpenClawBridge {
   private stopped = false;
   private typingTicketByPeer = new Map<string, string>();
 
-  constructor(config: WechatOpenClawBridgeConfig, agent: Agent, log: LogFn) {
+  constructor(config: WechatOpenClawBridgeConfig, agent: Agent, log: LogFn, cacheDir: string) {
     this.config = config;
     this.agent = agent;
     this.log = log;
+    this.cacheDir = cacheDir;
   }
 
   setPromptCallback(cb: (channelId: string) => void): void {
@@ -268,12 +272,52 @@ export class WechatOpenClawBridge {
       setContextToken(this.config.account_id || "default", fromUserId, message.context_token);
     }
 
-    if (!text) {
+    // Download media items (image, file, video)
+    const messageId = String(message.message_id ?? Date.now());
+    const downloadedMedia: DownloadedMedia[] = [];
+    for (const item of message.item_list ?? []) {
+      if (!isMediaItem(item)) continue;
+      const media = await downloadMediaItem({
+        item,
+        cdnBaseUrl: DEFAULT_CDN_BASE_URL,
+        cacheDir: this.cacheDir,
+        channelKind: "weixin-openclaw-bridge",
+        chatId: fromUserId,
+        messageId: item.msg_id ?? messageId,
+        label: `inbound[${fromUserId}]`,
+      });
+      if (media) downloadedMedia.push(media);
+    }
+
+    // Drop only if both text and media are empty
+    if (!text && downloadedMedia.length === 0) {
       logger.debug(
-        `drop inbound message_id=${String(message.message_id ?? "")} from=${fromUserId} because no text payload was extracted`,
+        `drop inbound message_id=${messageId} from=${fromUserId} because no text or media payload`,
       );
       return;
     }
+
+    // Build ACP prompt content blocks
+    const contentBlocks: ContentBlock[] = [];
+
+    if (text) {
+      contentBlocks.push({ type: "text", text });
+    } else if (downloadedMedia.length > 0) {
+      // Media-only message — add descriptive text
+      const types = [...new Set(downloadedMedia.map((m) => m.type))].join(", ");
+      contentBlocks.push({ type: "text", text: `The user sent ${types}.` });
+    }
+
+    for (const media of downloadedMedia) {
+      contentBlocks.push({
+        type: "resource_link",
+        uri: `file://${media.path}`,
+        name: media.fileName ?? path.basename(media.path),
+        mimeType: media.mimeType,
+      });
+    }
+
+    if (contentBlocks.length === 0) return;
 
     // Notify stream handler and start typing BEFORE prompt
     const channelId = `weixin-openclaw-bridge:${fromUserId}`;
@@ -284,11 +328,11 @@ export class WechatOpenClawBridge {
 
     // Send as ACP prompt — blocks until turn completes, returns real StopReason.
     // Session notifications stream in during the call.
-    this.log("debug", `prompt peer=${fromUserId} text=${text.slice(0, 80)}`);
+    this.log("debug", `prompt peer=${fromUserId} blocks=${contentBlocks.length} text=${(text ?? "").slice(0, 80)}`);
     try {
       const response = await this.agent.prompt({
         sessionId: fromUserId,
-        prompt: [{ type: "text", text }],
+        prompt: contentBlocks,
       });
       this.log("info", `prompt done peer=${fromUserId} stopReason=${response.stopReason}`);
       this.onAgentEnd?.({ channelId });
