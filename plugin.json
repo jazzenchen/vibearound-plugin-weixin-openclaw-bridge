@@ -10,11 +10,9 @@
   "configSchema": {
     "type": "object",
     "properties": {
-      "base_url": { "type": "string", "description": "WeChat provider base URL" },
-      "bot_token": { "type": "string", "description": "WeChat bot token from OpenClaw-style QR login" },
-      "account_id": { "type": "string", "description": "Optional account identifier returned after QR login" }
+      "base_url": { "type": "string", "description": "WeChat provider base URL", "default": "https://ilinkai.weixin.qq.com", "hidden": true }
     },
-    "required": ["base_url"]
+    "required": []
   },
   "capabilities": {
     "streaming": false,
