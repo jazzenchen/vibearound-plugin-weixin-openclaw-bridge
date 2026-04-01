@@ -55,8 +55,10 @@ export class AgentStreamHandler extends BlockRenderer<string> {
     return `weixin-openclaw-bridge:${sessionId}`;
   }
 
-  /** WeChat uses plain text with emoji prefixes. */
-  protected formatContent(kind: BlockKind, content: string, _sealed: boolean): string {
+  /** WeChat uses plain text with emoji prefixes. Only send complete (sealed) blocks
+   *  — WeChat can't edit messages, so intermediate flushes would create duplicates. */
+  protected formatContent(kind: BlockKind, content: string, sealed: boolean): string {
+    if (!sealed) return "";
     switch (kind) {
       case "thinking": return `💭 ${content}`;
       case "tool":     return content.trim();
