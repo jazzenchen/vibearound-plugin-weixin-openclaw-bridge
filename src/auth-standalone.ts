@@ -15,6 +15,7 @@
 
 import { createInterface } from "node:readline";
 import { startWeixinLoginWithQr, waitForWeixinLogin } from "./auth/login-qr.js";
+import { WECHAT_BASE_URL } from "./protocol.js";
 
 function sendJson(obj: unknown): void {
   process.stdout.write(JSON.stringify(obj) + "\n");
@@ -62,15 +63,10 @@ rl.on("line", async (line) => {
     }
 
     case "login_qr_start": {
-      const baseUrl = params?.baseUrl as string;
-      if (!baseUrl) {
-        sendError(id, "baseUrl is required");
-        break;
-      }
-      log(`starting QR login, baseUrl=${baseUrl}`);
+      log(`starting QR login, baseUrl=${WECHAT_BASE_URL}`);
       try {
         const result = await startWeixinLoginWithQr({
-          apiBaseUrl: baseUrl,
+          apiBaseUrl: WECHAT_BASE_URL,
           force: true,
         });
         sendResponse(id, {
@@ -85,17 +81,16 @@ rl.on("line", async (line) => {
     }
 
     case "login_qr_wait": {
-      const baseUrl = params?.baseUrl as string;
       const sessionKey = params?.sessionKey as string;
       const timeoutMs = params?.timeoutMs as number | undefined;
-      if (!baseUrl || !sessionKey) {
-        sendError(id, "baseUrl and sessionKey are required");
+      if (!sessionKey) {
+        sendError(id, "sessionKey is required");
         break;
       }
       log(`waiting for QR confirmation, sessionKey=${sessionKey}`);
       try {
         const result = await waitForWeixinLogin({
-          apiBaseUrl: baseUrl,
+          apiBaseUrl: WECHAT_BASE_URL,
           sessionKey,
           timeoutMs,
         });

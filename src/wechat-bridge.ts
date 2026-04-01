@@ -19,6 +19,7 @@ import type {
   LoginQrWaitParams,
   WechatOpenClawBridgeConfig,
 } from "./protocol.js";
+import { WECHAT_BASE_URL } from "./protocol.js";
 import { logger } from "./util/logger.js";
 
 interface BridgeState {
@@ -89,7 +90,7 @@ export class WechatOpenClawBridge {
   async loginQrStart(params: LoginQrStartParams): Promise<Record<string, unknown>> {
     const result = await startWeixinLoginWithQr({
       accountId: params.accountId || this.config.account_id,
-      apiBaseUrl: params.baseUrl || this.config.base_url,
+      apiBaseUrl: WECHAT_BASE_URL,
       force: params.force,
       verbose: params.verbose,
     });
@@ -99,7 +100,7 @@ export class WechatOpenClawBridge {
   async loginQrWait(params: LoginQrWaitParams): Promise<Record<string, unknown>> {
     const result = await waitForWeixinLogin({
       sessionKey: params.sessionKey,
-      apiBaseUrl: params.baseUrl || this.config.base_url,
+      apiBaseUrl: WECHAT_BASE_URL,
       timeoutMs: params.timeoutMs,
       verbose: params.verbose,
     });
@@ -121,7 +122,7 @@ export class WechatOpenClawBridge {
       to,
       text: params.text,
       opts: {
-        baseUrl: this.config.base_url,
+        baseUrl: WECHAT_BASE_URL,
         token: this.config.bot_token,
         contextToken: getContextToken(this.config.account_id || "default", to),
       },
@@ -134,7 +135,7 @@ export class WechatOpenClawBridge {
     const ticket = await this.resolveTypingTicket(to);
     if (!ticket) return;
     await sendTyping({
-      baseUrl: this.config.base_url,
+      baseUrl: WECHAT_BASE_URL,
       token: this.config.bot_token,
       body: {
         ilink_user_id: to,
@@ -150,7 +151,7 @@ export class WechatOpenClawBridge {
     const ticket = this.typingTicketByPeer.get(to) ?? (await this.resolveTypingTicket(to));
     if (!ticket) return;
     await sendTyping({
-      baseUrl: this.config.base_url,
+      baseUrl: WECHAT_BASE_URL,
       token: this.config.bot_token,
       body: {
         ilink_user_id: to,
@@ -164,7 +165,7 @@ export class WechatOpenClawBridge {
     if (!this.config.bot_token) {
       throw new Error("bot_token is required before uploading WeChat media");
     }
-    const uploadOpts: WeixinApiOptions = { baseUrl: this.config.base_url, token: this.config.bot_token };
+    const uploadOpts: WeixinApiOptions = { baseUrl: WECHAT_BASE_URL, token: this.config.bot_token };
     const mime = getMimeFromFilename(filePath);
     if (mime.startsWith("video/")) {
       return uploadVideoToWeixin({ filePath, toUserId: to, opts: uploadOpts, cdnBaseUrl: DEFAULT_CDN_BASE_URL });
@@ -196,7 +197,7 @@ export class WechatOpenClawBridge {
       to,
       text: params.text ?? "",
       opts: {
-        baseUrl: this.config.base_url,
+        baseUrl: WECHAT_BASE_URL,
         token: this.config.bot_token,
         contextToken: getContextToken(this.config.account_id || "default", to),
       },
@@ -210,7 +211,7 @@ export class WechatOpenClawBridge {
     if (!this.config.bot_token) return undefined;
     try {
       const config = await getConfig({
-        baseUrl: this.config.base_url,
+        baseUrl: WECHAT_BASE_URL,
         token: this.config.bot_token,
         ilinkUserId: to,
         contextToken: getContextToken(this.config.account_id || "default", to),
@@ -229,7 +230,7 @@ export class WechatOpenClawBridge {
     while (!this.stopped && this.config.bot_token) {
       try {
         const response = await getUpdates({
-          baseUrl: this.config.base_url,
+          baseUrl: WECHAT_BASE_URL,
           token: this.config.bot_token,
           timeoutMs: this.state.longPollTimeoutMs,
           get_updates_buf: this.state.getUpdatesBuf,

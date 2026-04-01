@@ -87,10 +87,6 @@ async function start(): Promise<void> {
   const config = meta.config as unknown as WechatOpenClawBridgeConfig;
   const cacheDir = meta.cacheDir ?? path.join(os.homedir(), ".vibearound", ".cache");
 
-  if (!config.base_url) {
-    throw new Error("base_url is required in WeChat OpenClaw Bridge config");
-  }
-
   log("info", `initialized, host=${agentInfo.name ?? "unknown"} cacheDir=${cacheDir}`);
 
   // Create bridge

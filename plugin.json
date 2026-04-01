@@ -9,9 +9,7 @@
   "minHostVersion": "0.1.0",
   "configSchema": {
     "type": "object",
-    "properties": {
-      "base_url": { "type": "string", "description": "WeChat provider base URL", "default": "https://ilinkai.weixin.qq.com", "hidden": true }
-    },
+    "properties": {},
     "required": []
   },
   "capabilities": {

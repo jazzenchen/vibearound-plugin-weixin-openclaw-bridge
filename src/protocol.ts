@@ -20,8 +20,9 @@ export interface JsonRpcResponse {
 
 export type JsonRpcMessage = JsonRpcRequest | JsonRpcNotification | JsonRpcResponse;
 
+export const WECHAT_BASE_URL = "https://ilinkai.weixin.qq.com";
+
 export interface WechatOpenClawBridgeConfig {
-  base_url: string;
   bot_token?: string;
   account_id?: string;
 }
@@ -61,7 +62,6 @@ export interface PluginCapabilities {
 }
 
 export interface LoginQrStartParams {
-  baseUrl?: string;
   accountId?: string;
   force?: boolean;
   timeoutMs?: number;
@@ -69,7 +69,6 @@ export interface LoginQrStartParams {
 }
 
 export interface LoginQrWaitParams {
-  baseUrl?: string;
   sessionKey: string;
   timeoutMs?: number;
   verbose?: boolean;
