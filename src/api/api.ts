@@ -82,7 +82,6 @@ async function apiFetch(params: {
 }): Promise<string> {
   const base = ensureTrailingSlash(params.baseUrl);
   const url = new URL(params.endpoint, base);
-  logger.debug(`POST ${redactUrl(url.toString())} body=${redactBody(params.body)}`);
 
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), params.timeoutMs);
@@ -95,7 +94,6 @@ async function apiFetch(params: {
     });
     clearTimeout(t);
     const rawText = await res.text();
-    logger.debug(`${params.label} status=${res.status} raw=${redactBody(rawText)}`);
     if (!res.ok) {
       throw new Error(`${params.label} ${res.status}: ${rawText}`);
     }
@@ -125,7 +123,6 @@ export async function getUpdates(
     return JSON.parse(rawText) as GetUpdatesResp;
   } catch (err) {
     if (err instanceof Error && err.name === "AbortError") {
-      logger.debug(`getUpdates: client-side timeout after ${timeout}ms, returning empty response`);
       return { ret: 0, msgs: [], get_updates_buf: params.get_updates_buf };
     }
     throw err;
