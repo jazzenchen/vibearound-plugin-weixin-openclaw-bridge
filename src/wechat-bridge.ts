@@ -338,8 +338,9 @@ export class WechatOpenClawBridge {
       this.log("info", `prompt done peer=${fromUserId} stopReason=${response.stopReason}`);
       this.onAgentEnd?.({ channelId });
     } catch (error: unknown) {
-      this.log("error", `prompt failed peer=${fromUserId}: ${error}`);
-      this.onAgentError?.({ channelId, error: String(error) });
+      const msg = error instanceof Error ? error.message : String(error);
+      this.log("error", `prompt failed peer=${fromUserId}: ${msg}`);
+      this.onAgentError?.({ channelId, error: msg });
     } finally {
       await this.stopTyping(channelId).catch((e) => {
         this.log("warn", `stop typing failed: ${e}`);
