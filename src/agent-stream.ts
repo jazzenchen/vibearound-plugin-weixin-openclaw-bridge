@@ -66,14 +66,18 @@ export class AgentStreamHandler extends BlockRenderer<string> {
     }
   }
 
-  /** Send block as a new message (no editing on WeChat). */
+  /** Send block as a new message (no editing on WeChat).
+   *
+   *  Returns a non-null sentinel ref so that BlockRenderer's flushBlock guard
+   *  (`block.ref === null`) prevents duplicate sends if the same sealed block
+   *  is flushed more than once (race between timer-based flush and seal flush). */
   protected async sendBlock(channelId: string, _kind: BlockKind, content: string): Promise<string | null> {
     try {
       await this.send({ channelId, text: content });
     } catch (e) {
       this.log("error", `sendBlock failed: ${e}`);
     }
-    return null; // no message ref — send-only
+    return "sent"; // non-null sentinel — prevents duplicate sends
   }
 
   // No editBlock — WeChat doesn't support message editing
