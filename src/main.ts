@@ -14,7 +14,6 @@ import path from "node:path";
 import os from "node:os";
 import {
   connectToHost,
-  normalizeExtMethod,
   type SessionNotification,
   type RequestPermissionRequest,
   type RequestPermissionResponse,
@@ -59,7 +58,7 @@ async function start(): Promise<void> {
       },
 
       async extNotification(method: string, params: Record<string, unknown>): Promise<void> {
-        switch (normalizeExtMethod(method)) {
+        switch (method) {
           case "channel/system_text": {
             streamHandler?.onSendSystemText(params);
             break;
