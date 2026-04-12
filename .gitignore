@@ -25,3 +25,4 @@ src/tools/docs/
 # local package inspection artifacts
 .tmp-official/
 *.tgz
+bun.lock
