@@ -1,13 +1,8 @@
 /**
- * AgentStreamHandler — receives ACP session updates and renders them as
- * separate WeChat messages, one per contiguous variant block.
+ * WeChat stream renderer — extends BlockRenderer for WeChat OpenClaw Bridge.
  *
- * Extends BlockRenderer from @vibearound/plugin-channel-sdk which handles:
- *   - Block accumulation and kind-change detection
- *   - Verbose filtering (thinking / tool blocks)
- *
- * WeChat is send-only (no message editing), so no editBlock is implemented.
- * Typing indicators are managed by the bridge, not this handler.
+ * WeChat is send-only (no message editing). Uses streaming=false so each
+ * block is held until complete, then sent as one message.
  */
 
 import {
@@ -15,65 +10,31 @@ import {
   type BlockKind,
   type VerboseConfig,
 } from "@vibearound/plugin-channel-sdk";
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
+import type { WechatOpenClawBridge } from "./wechat-bridge.js";
 
 type LogFn = (level: string, message: string) => void;
-type SendFn = (params: { channelId: string; text: string; replyTo?: string }) => Promise<void>;
-
-// ---------------------------------------------------------------------------
-// AgentStreamHandler
-// ---------------------------------------------------------------------------
 
 export class AgentStreamHandler extends BlockRenderer<string> {
+  private bridge: WechatOpenClawBridge;
   private log: LogFn;
-  private send: SendFn;
-  private lastActiveChannelId: string | null = null;
 
-  constructor(
-    send: SendFn,
-    log: LogFn,
-    options?: {
-      verbose?: Partial<VerboseConfig>;
-    },
-  ) {
+  constructor(bridge: WechatOpenClawBridge, log: LogFn, verbose?: Partial<VerboseConfig>) {
     super({
+      streaming: false,
       flushIntervalMs: 500,
-      minEditIntervalMs: 0, // send-only, no throttle needed
-      verbose: options?.verbose,
+      verbose,
     });
-    this.send = send;
+    this.bridge = bridge;
     this.log = log;
   }
 
-  // ---- BlockRenderer overrides ----
-
-  /** Prefix sessionId with channel kind. */
-  protected sessionIdToChannelId(sessionId: string): string {
-    return `weixin-openclaw-bridge:${sessionId}`;
+  protected async sendText(chatId: string, text: string): Promise<void> {
+    await this.bridge.sendSystemText({ chatId, text });
   }
 
-  /** WeChat uses plain text with emoji prefixes. Only send complete (sealed) blocks
-   *  — WeChat can't edit messages, so intermediate flushes would create duplicates. */
-  protected formatContent(kind: BlockKind, content: string, sealed: boolean): string {
-    if (!sealed) return "";
-    switch (kind) {
-      case "thinking": return `💭 ${content}`;
-      case "tool":     return content.trim();
-      case "text":     return content;
-    }
-  }
-
-  /** Send block as a new message (no editing on WeChat).
-   *
-   *  Returns a non-null sentinel ref so that BlockRenderer's flushBlock guard
-   *  (`block.ref === null`) prevents duplicate sends if the same sealed block
-   *  is flushed more than once (race between timer-based flush and seal flush). */
-  protected async sendBlock(channelId: string, _kind: BlockKind, content: string): Promise<string | null> {
+  protected async sendBlock(chatId: string, _kind: BlockKind, content: string): Promise<string | null> {
     try {
-      await this.send({ channelId, text: content });
+      await this.bridge.sendSystemText({ chatId, text: content });
     } catch (e) {
       this.log("error", `sendBlock failed: ${e}`);
     }
@@ -81,48 +42,4 @@ export class AgentStreamHandler extends BlockRenderer<string> {
   }
 
   // No editBlock — WeChat doesn't support message editing
-
-  /** Cleanup after turn. */
-  protected async onAfterTurnEnd(_channelId: string): Promise<void> {
-    // Typing is managed by the bridge
-  }
-
-  /** Send error message. */
-  protected async onAfterTurnError(channelId: string, error: string): Promise<void> {
-    this.send({ channelId, text: `❌ Error: ${error}` }).catch((e) => {
-      this.log("error", `send error notice failed: ${e}`);
-    });
-  }
-
-  // ---- Prompt lifecycle ----
-
-  onPromptSent(channelId: string): void {
-    this.lastActiveChannelId = channelId;
-    super.onPromptSent(channelId);
-  }
-
-  // ---- Host ext notification handlers ----
-
-  onAgentReady(agent: string, version: string): void {
-    const channelId = this.lastActiveChannelId;
-    if (channelId) {
-      this.send({ channelId, text: `🤖 Agent: ${agent} v${version}` }).catch(() => {});
-    }
-  }
-
-  onSessionReady(sessionId: string): void {
-    const channelId = this.lastActiveChannelId;
-    if (channelId) {
-      this.send({ channelId, text: `📋 Session: ${sessionId}` }).catch(() => {});
-    }
-  }
-
-  onSendSystemText(params: Record<string, unknown>): void {
-    const channelId = params.channelId as string;
-    const text = params.text as string;
-    const replyTo = params.replyTo as string | undefined;
-    this.send({ channelId, text, replyTo }).catch((e) => {
-      this.log("error", `send_system_text failed: ${e}`);
-    });
-  }
 }
