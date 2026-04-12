@@ -38,9 +38,7 @@ export class WechatOpenClawBridge {
   private agent: Agent;
   private log: LogFn;
   private cacheDir: string;
-  private onPromptSent?: (channelId: string) => void;
-  private onAgentEnd?: (params: { channelId: string }) => void;
-  private onAgentError?: (params: { channelId: string; error: string }) => void;
+  private streamHandler: import("./agent-stream.js").AgentStreamHandler | null = null;
   private state: BridgeState = {
     getUpdatesBuf: "",
     longPollTimeoutMs: DEFAULT_LONG_POLL_TIMEOUT_MS,
@@ -56,16 +54,8 @@ export class WechatOpenClawBridge {
     this.cacheDir = cacheDir;
   }
 
-  setPromptCallback(cb: (channelId: string) => void): void {
-    this.onPromptSent = cb;
-  }
-
-  setTurnCallbacks(
-    onEnd: (params: { channelId: string }) => void,
-    onError: (params: { channelId: string; error: string }) => void,
-  ): void {
-    this.onAgentEnd = onEnd;
-    this.onAgentError = onError;
+  setStreamHandler(handler: import("./agent-stream.js").AgentStreamHandler): void {
+    this.streamHandler = handler;
   }
 
   async probe(): Promise<{ id?: string; name: string }> {
@@ -113,11 +103,11 @@ export class WechatOpenClawBridge {
     return result as Record<string, unknown>;
   }
 
-  async sendSystemText(params: { channelId: string; text: string; replyTo?: string }): Promise<void> {
+  async sendSystemText(params: { chatId: string; text: string; replyTo?: string }): Promise<void> {
     if (!this.config.bot_token) {
       throw new Error("bot_token is required before sending WeChat messages");
     }
-    const to = this.extractPeerId(params.channelId);
+    const to = this.extractPeerId(params.chatId);
     await sendMessageWeixin({
       to,
       text: params.text,
@@ -129,9 +119,9 @@ export class WechatOpenClawBridge {
     });
   }
 
-  async startTyping(channelId: string): Promise<void> {
+  async startTyping(chatId: string): Promise<void> {
     if (!this.config.bot_token) return;
-    const to = this.extractPeerId(channelId);
+    const to = this.extractPeerId(chatId);
     const ticket = await this.resolveTypingTicket(to);
     if (!ticket) return;
     await sendTyping({
@@ -145,9 +135,9 @@ export class WechatOpenClawBridge {
     });
   }
 
-  async stopTyping(channelId: string): Promise<void> {
+  async stopTyping(chatId: string): Promise<void> {
     if (!this.config.bot_token) return;
-    const to = this.extractPeerId(channelId);
+    const to = this.extractPeerId(chatId);
     const ticket = this.typingTicketByPeer.get(to) ?? (await this.resolveTypingTicket(to));
     if (!ticket) return;
     await sendTyping({
@@ -187,11 +177,11 @@ export class WechatOpenClawBridge {
     return this.prepareMediaFromFile(filePath, to);
   }
 
-  async sendMediaFile(params: { channelId: string; filePath: string; text?: string }): Promise<void> {
+  async sendMediaFile(params: { chatId: string; filePath: string; text?: string }): Promise<void> {
     if (!this.config.bot_token) {
       throw new Error("bot_token is required before sending WeChat media");
     }
-    const to = this.extractPeerId(params.channelId);
+    const to = this.extractPeerId(params.chatId);
     await sendWeixinMediaFile({
       filePath: params.filePath,
       to,
@@ -321,9 +311,9 @@ export class WechatOpenClawBridge {
     if (contentBlocks.length === 0) return;
 
     // Notify stream handler and start typing BEFORE prompt
-    const channelId = `weixin-openclaw-bridge:${fromUserId}`;
-    this.onPromptSent?.(channelId);
-    await this.startTyping(channelId).catch((e) => {
+    const chatId = fromUserId;
+    this.streamHandler?.onPromptSent(chatId);
+    await this.startTyping(chatId).catch((e) => {
       this.log("warn", `start typing failed: ${e}`);
     });
 
@@ -336,21 +326,21 @@ export class WechatOpenClawBridge {
         prompt: contentBlocks,
       });
       this.log("info", `prompt done peer=${fromUserId} stopReason=${response.stopReason}`);
-      this.onAgentEnd?.({ channelId });
+      this.streamHandler?.onTurnEnd(chatId);
     } catch (error: unknown) {
       const msg = error instanceof Error ? error.message : String(error);
       this.log("error", `prompt failed peer=${fromUserId}: ${msg}`);
-      this.onAgentError?.({ channelId, error: msg });
+      this.streamHandler?.onTurnError(chatId, msg);
     } finally {
-      await this.stopTyping(channelId).catch((e) => {
+      await this.stopTyping(chatId).catch((e) => {
         this.log("warn", `stop typing failed: ${e}`);
       });
     }
   }
 
-  private extractPeerId(channelId: string): string {
-    const separator = channelId.indexOf(":");
-    return separator >= 0 ? channelId.slice(separator + 1) : channelId;
+  private extractPeerId(chatId: string): string {
+    const separator = chatId.indexOf(":");
+    return separator >= 0 ? chatId.slice(separator + 1) : chatId;
   }
 
   private sleep(ms: number): Promise<void> {
