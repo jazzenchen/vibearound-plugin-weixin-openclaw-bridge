@@ -310,8 +310,12 @@ export class WechatOpenClawBridge {
 
     if (contentBlocks.length === 0) return;
 
-    // Notify stream handler and start typing BEFORE prompt
     const chatId = fromUserId;
+    if (text && this.streamHandler?.consumePendingText(chatId, text)) {
+      return;
+    }
+
+    // Notify stream handler and start typing BEFORE prompt
     this.streamHandler?.onPromptSent(chatId);
     await this.startTyping(chatId).catch((e) => {
       this.log("warn", `start typing failed: ${e}`);
