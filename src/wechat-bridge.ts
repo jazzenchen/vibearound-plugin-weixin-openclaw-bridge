@@ -234,10 +234,6 @@ export class WechatOpenClawBridge {
         }
 
         if ((response.ret && response.ret !== 0) || (response.errcode && response.errcode !== 0)) {
-          this.log(
-            "warn",
-            `getUpdates returned ret=${response.ret} errcode=${response.errcode} errmsg=${response.errmsg ?? ""}`,
-          );
           await this.sleep(2000);
           continue;
         }
@@ -246,7 +242,6 @@ export class WechatOpenClawBridge {
           this.handleInboundMessage(message);
         }
       } catch (error) {
-        this.log("error", `getUpdates failed: ${error instanceof Error ? error.message : String(error)}`);
         await this.sleep(2000);
       }
     }
